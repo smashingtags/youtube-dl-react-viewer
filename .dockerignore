@@ -1,5 +1,4 @@
 TODO.txt
-CHECKS.txt
 
 #releases
 /releases
@@ -27,4 +26,3 @@ CHECKS.txt
 npm-debug.log*
 yarn-debug.log*
 yarn-error.log*
-debug.log*

@@ -5,34 +5,25 @@ import slash from 'slash';
 import Video from '../models/video.model.js';
 
 import {
-    sortBy,
+    search,
     getTotals,
     getRandomVideo,
     fields,
     getSimilarVideos,
+    limitVideoList,
 } from '../utilities/video.utility.js';
 
 const router = express.Router();
 
 router.get('/search/:page', async function (req, res) {
     const page = parseInt(req.params.page) || 0;
-    let pattern = {};
-    let options = {};
-    if (req.query.search) {
-        pattern = { $text: { $search: req.query.search } };
-        options = { score: { $meta: 'textScore' } };
-    }
 
     let videos;
     try {
-        videos = await Video.find(pattern, options)
-            .select('-_id extractor id title mediumResizedThumbnailFile directory uploader videoFile uploadDate duration width height viewCount')
-            .sort(sortBy(req.query['sort'], req.query.search))
-            .skip(page * parseInt(process.env.PAGE_SIZE))
-            .limit(parseInt(process.env.PAGE_SIZE))
-            .lean()
-            .exec();
-    } catch (err) {
+        videos = await search(req.query, page);
+    }
+    catch (err) {
+        if (parsedEnv.VERBOSE) console.error(err);
         return res.sendStatus(500);
     }
 
@@ -40,13 +31,15 @@ router.get('/search/:page', async function (req, res) {
     let randomVideo;
     if (page === 0) {
         try {
-            totals = await getTotals(pattern);
+            totals = await getTotals(req.query);
         } catch (err) {
+            if (parsedEnv.VERBOSE) console.error(err);
             return res.sendStatus(500);
         }
         try {
-            randomVideo = await getRandomVideo(totals.count, pattern, options);
+            randomVideo = await getRandomVideo(req.query, totals.count);
         } catch (err) {
+            if (parsedEnv.VERBOSE) console.error(err);
             return res.sendStatus(500);
         }
     }
@@ -63,6 +56,9 @@ router.get('/:extractor/:id', async (req, res) => {
     let uploaderVideos;
     let playlistVideos;
     let jobVideos;
+    let uploaderVideosOffset;
+    let playlistVideosOffset;
+    let jobVideosOffset;
     try {
         video = (await Video.findOne({
             extractor: req.params.extractor,
@@ -71,35 +67,43 @@ router.get('/:extractor/:id', async (req, res) => {
         + ' uploaderDocument fps webpageUrl dateDownloaded width height'
         + ' likeCount dislikeCount subtitleFiles jobDocument mediumResizedThumbnailFile'
         + ' license ageLimit seasonNumber episodeNumber trackNumber discNumber'
-        + ' releaseYear format tbr asr vbr vcodec acodec ext ' + fields
+        + ' releaseYear format tbr asr vbr vcodec acodec ext playlistId playlistDocument' + fields
         )
-            .populate('uploaderDocument jobDocument')
+            .populate('uploaderDocument playlistDocument jobDocument')
             .exec()
         )?.toJSON();
         if (!video) return res.sendStatus(404);
 
         if (video.uploader) uploaderVideos = await Video.find(
-            { uploader: video.uploader },
-            '-_id extractor id title uploader duration directory smallResizedThumbnailFile viewCount width height')
+            { uploaderDocument: video.uploaderDocument },
+            '-_id extractor id title uploader duration directory smallResizedThumbnailFile viewCount width height uploaderDocument')
+            .populate('uploaderDocument', 'extractor id name')
             .sort({ uploadDate: -1 })
             .lean()
             .exec();
 
-        if (video.playlist) playlistVideos = await Video.find(
-            { playlist: video.playlist },
-            '-_id extractor id title uploader duration directory smallResizedThumbnailFile viewCount width height')
+        if (video.playlistId) playlistVideos = await Video.find(
+            { extractor: video.extractor, playlistId: video.playlistId },
+            '-_id extractor id title uploader duration directory smallResizedThumbnailFile viewCount width height uploaderDocument')
+            .populate('uploaderDocument', 'extractor id name')
             .sort({ playlistIndex: 1 })
             .lean()
             .exec();
 
         jobVideos = await Video.find(
             { jobDocument: video.jobDocument },
-            '-_id extractor id title uploader duration directory smallResizedThumbnailFile viewCount width height')
+            '-_id extractor id title uploader duration directory smallResizedThumbnailFile viewCount width height uploaderDocument')
+            .populate('uploaderDocument', 'extractor id name')
             .sort({ dateDownloaded: -1 })
             .lean()
             .exec();
 
+        if (uploaderVideos) [uploaderVideos, uploaderVideosOffset] = limitVideoList(uploaderVideos, video);
+        if (playlistVideos) [playlistVideos, playlistVideosOffset] = limitVideoList(playlistVideos, video);
+        if (jobVideos) [jobVideos, jobVideosOffset] = limitVideoList(jobVideos, video);
+
     } catch (err) {
+        console.error(err)
         return res.sendStatus(500);
     }
 
@@ -115,8 +119,11 @@ router.get('/:extractor/:id', async (req, res) => {
         uploaderVideos,
         playlistVideos,
         jobVideos,
+        uploaderVideosOffset,
+        playlistVideosOffset,
+        jobVideosOffset,
         similarVideos,
-        localVideoPath: slash(path.join(process.env.OUTPUT_DIRECTORY, 'videos', video.directory, video.videoFile.name)),
+        localVideoPath: slash(path.join(parsedEnv.OUTPUT_DIRECTORY, 'videos', video.directory, video.videoFile.name)),
     });
 });
 

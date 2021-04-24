@@ -1,41 +1,99 @@
 import Video from '../models/video.model.js';
+import Statistic from '../models/statistic.model.js';
 
-export const sortBy = (option, hasSearch = false) => {
+export const search = async (query, page, filter = {}, relevanceMeans = 'uploadDate', relevanceDirection = -1) => {
+    let sortField = sortBy(query['sort'], relevanceMeans, relevanceDirection);
+
+    let fields = {
+        _id: 0,
+        extractor: 1,
+        id: 1,
+        title: 1,
+        smallResizedThumbnailFile: 1,
+        mediumResizedThumbnailFile: 1,
+        directory: 1,
+        uploader: 1,
+        videoFile: 1,
+        uploadDate: 1,
+        duration: 1,
+        width: 1,
+        height: 1,
+        viewCount: 1,
+        uploaderDocument: 1,
+    }
+    if (sortField.name !== 'videoFile.filesize') fields[sortField.name] = 1;
+
+    let pipeline = [
+        { $match: filter },
+        {
+            $project: fields,
+        },
+        { $addFields: { propertyType: { $type: '$' + sortField.name } } },
+        { $addFields: { propertyIsNull: { $cond: { if: { $in: ['$propertyType', ['null', 'missing']] }, then: 1, else: 0 } } } },
+        {
+            $sort:
+                (query['sort'] === 'relevance' && query.search)
+                    ? { score: { $meta: 'textScore' }, [sortField.name]: sortField.direction }
+                    : { propertyIsNull: 1, [sortField.name]: sortField.direction }
+        },
+        { $project: { propertyType: 0, propertyIsNull: 0 } },
+        { $skip: page * parsedEnv.PAGE_SIZE },
+        { $limit: parsedEnv.PAGE_SIZE },
+    ];
+    if (query.search) pipeline.unshift({ $match: { $text: { $search: query.search } } });
+
+    let videos = await Video.aggregate(pipeline);
+    return await Video.populate(videos, { path: 'uploaderDocument', select: 'extractor id name' });
+}
+
+export const sortBy = (option, relevanceMeans, relevanceDirection) => {
     switch (option) {
         case 'relevance':
-            if (hasSearch) {
-                return { score: { $meta: 'textScore' } };
-            } else {
-                return { uploadDate: -1 };
-            }
+            return { name: relevanceMeans, direction: relevanceDirection };
         case 'newest_date':
-            return { uploadDate: -1 };
+            return { name: 'uploadDate', direction: -1 };
         case 'oldest_date':
-            return { uploadDate: 1 };
+            return { name: 'uploadDate', direction: 1 };
         case 'longest_duration':
-            return { duration: -1 };
+            return { name: 'duration', direction: -1 };
         case 'shortest_duration':
-            return { duration: 1 };
+            return { name: 'duration', direction: 1 };
         case 'largest_size':
-            return { 'videoFile.filesize': -1 };
+            return { name: 'videoFile.filesize', direction: -1 };
         case 'smallest_size':
-            return { 'videoFile.filesize': 1 };
+            return { name: 'videoFile.filesize', direction: 1 };
         case 'most_views':
-            return { viewCount: -1 };
+            return { name: 'viewCount', direction: -1 };
         case 'least_views':
-            return { viewCount: 1 };
+            return { name: 'viewCount', direction: 1 };
         case 'most_likes':
-            return { likeCount: -1 };
+            return { name: 'likeCount', direction: -1 };
         case 'least_likes':
-            return { likeCount: 1 };
+            return { name: 'likeCount', direction: 1 };
+        case 'most_dislikes':
+            return { name: 'dislikeCount', direction: -1 };
+        case 'least_dislikes':
+            return { name: 'dislikeCount', direction: 1 };
+        case 'ratio_likes':
+            return { name: 'likeDislikeRatio', direction: -1 };
+        case 'ratio_dislikes':
+            return { name: 'likeDislikeRatio', direction: 1 };
+        case 'newest_download':
+            return { name: 'dateDownloaded', direction: -1 };
+        case 'oldest_download':
+            return { name: 'dateDownloaded', direction: 1 };
         default:
-            return { uploadDate: -1 };
+            return { name: relevanceMeans, direction: relevanceDirection };
     }
 }
 
-export const getTotals = async (pattern) => {
+export const getTotals = async (query, filter = {}) => {
     let totals = (await Video.aggregate([
-        { $match: pattern },
+        {
+            $match: query.search
+                ? { $text: { $search: query.search } }
+                : filter,
+        },
         {
             $group: {
                 _id: null,
@@ -45,7 +103,7 @@ export const getTotals = async (pattern) => {
                 filesize: {
                     $sum: "$videoFile.filesize"
                 },
-                count: { $sum: 1 }
+                count: { $sum: 1 },
             }
         }]))[0];
     if (!totals) totals = {
@@ -56,8 +114,11 @@ export const getTotals = async (pattern) => {
     return totals;
 }
 
-export const getRandomVideo = async (count, pattern, options = {}) => {
-    return (await Video.findOne(pattern, options)
+export const getRandomVideo = async (query, count, filter = {}) => {
+    return (await Video.findOne(
+        query.search ? { $text: { $search: query.search } } : filter,
+        query.search ? { score: { $meta: 'textScore' } } : {},
+    )
         .select('extractor id')
         .skip(Math.random() * count)
     )?.toJSON();
@@ -95,21 +156,13 @@ export const fields = Object.keys(weightedFields).join(' ');
 export const getSimilarVideos = async (video) => {
     let $group = { _id: null };
     let $project = {};
+    let aggregatedFields = {};
+    let statistic = await Statistic.findOne({ accessKey: 'videos' });
     for (let field in weightedFields) {
         if (weightedFields[field].type === 'dot') {
-            $group[field] = { $push: '$' + field };
-            $project[field] = {
-                $reduce: {
-                    input: '$' + field,
-                    initialValue: [],
-                    in: { $setUnion: ['$$value', '$$this'] }
-                }
-            };
+            aggregatedFields[field] = statistic.statistics[field].map(item => item.name);
         }
     }
-
-    let aggregatedFields = (await Video.aggregate([{ $group }, { $project }]))[0];
-    delete aggregatedFields._id;
 
     let keywords = [];
     for (let field in weightedFields) {
@@ -124,7 +177,7 @@ export const getSimilarVideos = async (video) => {
     let videos = await Video
         .find(
             {},
-            'id extractor duration directory smallResizedThumbnailFile uploadDate videoFile width height viewCount '
+            'id extractor duration directory smallResizedThumbnailFile uploadDate videoFile viewCount width height uploaderDocument '
             + fields
         )
         .sort({ uploadDate: -1 })
@@ -171,8 +224,24 @@ export const getSimilarVideos = async (video) => {
     videos.length = Math.min(videos.length, 50);
     if (videos.length === 0) videos = undefined;
 
-    return videos;
+    return await Video.populate(videos, { path: 'uploaderDocument', select: 'extractor id name' });
 }
+
+export const limitVideoList = (videosList, video, limit = 100) => {
+    let index = -1;
+    videosList.find((videoInList, i) => {
+        if (videoInList.id === video.id && videoInList.extractor === video.extractor) {
+            index = i;
+            return;
+        }
+    });
+
+    let least = index - Math.floor(limit / 2);
+    let len = videosList.length;
+    if (least + limit > len) least = len - limit;
+    least = (least < 0) ? 0 : least;
+    return [videosList.slice(least, least + limit), least];
+};
 
 const createVector = (allTags, tags) => {
     let vector = [];

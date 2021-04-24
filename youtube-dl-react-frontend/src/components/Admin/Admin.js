@@ -52,6 +52,19 @@ export default class AdminPage extends Component {
         this.setState({ jobs });
     }
 
+    repairError = (errorId) => {
+        axios
+            .post(`/api/admin/errors/repair/${errorId}`)
+            .then(res => {
+                if (res.status === 200) {
+                    if (res.data.success) alert(res.data.success)
+                    if (res.data.error) alert('Error: ' + res.data.error)
+                }
+            }).catch(err => {
+                alert('Error: ' + getErrorMessage(err));
+            });
+    }
+
     render() {
         return (
             <PageLoadWrapper
@@ -64,6 +77,17 @@ export default class AdminPage extends Component {
                         style={{ maxWidth: '1200px' }}
                     >
                         <h1 className="mb-4">Admin</h1>
+                        {
+                            !!process.env?.REACT_APP_CHECK_FOR_UPDATES
+                            && process.env.REACT_APP_CHECK_FOR_UPDATES.toLowerCase() === 'true'
+                            && <UpdateChecker />
+                        }
+                        <h5 className="mb-4">youtube-dl</h5>
+                        <Card className="mb-4">
+                            <Card.Body>
+                                <ApplicationManager />
+                            </Card.Body>
+                        </Card>
                         <h5 className="mb-4">Download</h5>
                         <Card className="mb-4">
                             <Card.Body>
@@ -127,7 +151,7 @@ export default class AdminPage extends Component {
                             </Tab.Container>
                         </Card>
                         <h5 className="mb-4">Failed downloads</h5>
-
+                        <Alert variant="info">If you are expecting to see a error here but do not, check the errors.txt or unknown errors.txt file in the output directory.</Alert>
                         {this.state.errors.length > 0 ?
                             this.state.errors.map(error =>
                                 <Alert variant="danger" key={error._id}>
@@ -146,13 +170,23 @@ export default class AdminPage extends Component {
                                                 <pre className="pre-scrollable">
                                                     {JSON.stringify(JSON.parse(error.errorObject), null, 4).replace(/\\n/g, '\n')}
                                                 </pre>
+                                                {!!error.success && <Alert variant="success">{error.success}</Alert>}
+                                                {!!error.error && <Alert variant="danger">{error.error}</Alert>}
                                                 <Button
                                                     href={window.gitHubLink + '/issues'}
                                                     target="_blank"
                                                     rel="noopener noreferrer"
                                                     variant="danger"
+                                                    className="mr-2"
                                                 >
                                                     Report Error
+                                                </Button>
+                                                <Button
+                                                    className="mr-2"
+                                                    variant="danger"
+                                                    onClick={(e) => { this.repairError(error._id) }}
+                                                >
+                                                    Attempt Repair
                                                 </Button>
                                             </>
                                         </Accordion.Collapse>
@@ -164,6 +198,71 @@ export default class AdminPage extends Component {
                     </div>
                 }
             </PageLoadWrapper>
+        );
+    }
+}
+
+class UpdateChecker extends Component {
+    constructor(props) {
+        super(props);
+        this.state = {
+            message: undefined,
+            variant: undefined,
+        }
+    }
+
+    componentDidMount() {
+        axios.get(window.githubApiLink, {
+            headers: {
+                Accept: 'application/vnd.github.v3+json',
+            }
+        }).then(res => {
+            if (res.status === 200) {
+                if (res?.data?.tag_name) {
+                    if (this.getVersionScore(res.data.tag_name) > this.getVersionScore(window.scriptVersion)) {
+                        this.setState({
+                            message: <>A new release of youtube-dl-react-viewer is available ({res.data.tag_name.slice(1)} &gt; {window.scriptVersion}). <a
+                                href={window.gitHubLatestReleaseLink}
+                                target="_blank"
+                                rel="noopener noreferrer"
+                            >
+                                Download it here.
+                            </a></>,
+                            variant: 'info',
+                        });
+                    } else if (this.getVersionScore(res.data.tag_name) === this.getVersionScore(window.scriptVersion)) {
+                        this.setState({ message: `You are using the latest version of youtube-dl-react-viewer (${window.scriptVersion}).`, variant: 'success' });
+                    } else {
+                        this.setState({ message: `You are using a development version of youtube-dl-react-viewer (${window.scriptVersion}).
+                        Functionality may be missing or broken. Using development versions could cause irreversible damage to the database.`, variant: 'warning' });
+                    }
+                } else {
+                    this.setState({ message: 'Failed to check the latest version.', variant: 'danger' });
+                }
+            }
+        }).catch(err => {
+            this.setState({ message: 'Failed to check the latest version.', variant: 'danger' });
+        });
+    }
+
+    getVersionScore = (tagName) => {
+        if (tagName.startsWith('v')) tagName = tagName.slice(1);
+        let versionNumbers = tagName.split('.').reverse();
+        console.dir(versionNumbers)
+        let score = 0;
+        let scale = 1;
+        for (let i = 0; i < versionNumbers.length; i++) {
+            score += parseInt(versionNumbers[i]) * scale;
+            scale *= 100;
+        }
+        console.log(tagName, score)
+        return score;
+
+    }
+
+    render() {
+        return (
+            <Alert variant={this.state.variant}>{this.state.message}</Alert>
         );
     }
 }
@@ -431,6 +530,50 @@ class JobForm extends Component {
     }
 }
 
+class ApplicationManager extends Component {
+    static contextType = UserContext;
+
+    constructor(props) {
+        super(props);
+        this.state = {
+            success: undefined,
+            error: undefined,
+        };
+    }
+
+    post() {
+        this.setState({ success: undefined, error: undefined }, () => {
+            axios
+                .post(
+                    `/api/admin/youtube-dl/update`
+                ).then(res => {
+                    if (res.status === 200) this.setState({
+                        success: res.data.success,
+                        error: res.data.error
+                    });
+                }).catch(err => {
+                    this.setState({ error: getErrorMessage(err) });
+                });
+        });
+    }
+
+    render() {
+        return (
+            <>
+                {!!this.state.success && <Alert variant="success">{this.state.success}</Alert>}
+                {!!this.state.error && <Alert variant="danger">{this.state.error}</Alert>}
+                <Button
+                    name="update"
+                    type="submit"
+                    onClick={this.post.bind(this)}
+                >
+                    Check for updates
+                </Button>
+            </>
+        );
+    }
+}
+
 const defaultArguments = `# Some options are not included here are are set when executing youtube-dl. If you attempt to set those options here they will be overwritten.
 # Some options here should not be modified or if modified should only contain certain values.
 # You should be able set most other youtube-dl options without preventing the script from working properly.
@@ -448,6 +591,7 @@ const defaultArguments = `# Some options are not included here are are set when 
 # --format
 # --extract-audio
 # --download-archive
+# --cache-dir
 
 # These options may help the script run but are not necessary. They can be freely modified or removed:
 --geo-bypass

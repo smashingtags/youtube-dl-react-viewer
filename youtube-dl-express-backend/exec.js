@@ -11,44 +11,55 @@ import Video from './models/video.model.js';
 import Job from './models/job.model.js';
 import Statistic from './models/statistic.model.js';
 import Uploader from './models/uploader.model.js';
+import Playlist from './models/playlist.model.js';
 import DownloadError from './models/error.model.js';
+
+import parsed from './parse-env.js';
+import { incrementStatistics } from './utilities/statistic.utility.js';
 
 const program = commander.program;
 
+let debug;
+
 (async () => {
-    // Process command line arguments
-    program.name('youtube-dl-download-wrapper')
-        .version('1.0.0')
-        .requiredOption(
+    if (parsed.err) throw parsed.err;
+
+    debug = parsed.env.VERBOSE;
+
+    program.name('youtube-dl-exec-script')
+        .version('1.3.0') // Version is hardcoded here because on non-Windows systems this script has to be called by node instead of npm
+        .requiredOption('-v, --video <path>', 'Downloaded video file location')
+        .requiredOption('-j, --job-id <string>', 'Job document id')
+        .option(
             '--youtube-dl-version <version>',
             'Version of youtube-dl the video was downloaded with'
         )
-        .requiredOption('-j, --job-id <string>', 'Job document id')
-        .requiredOption('-v, --video <path>', 'Downloaded video file location')
+        .option('--is-repair', 'Is exec being called to repair a failed download', false)
+        .option('--error-id <string>', 'Error document id to be used in a repair')
+        .option('--is-import', 'Is exec being called to import an already downloaded video', false)
+        .option('--downloaded <downloaded>', 'Override the date downloaded')
         .option('-d, --debug', 'Show detailed error messages', false)
 
     program.parse(process.argv);
 
-    // Validate enviornment variables
-    if (process.env.OUTPUT_DIRECTORY.endsWith('/')
-        || process.env.OUTPUT_DIRECTORY.endsWith('\\')
-    ) {
-        process.env.OUTPUT_DIRECTORY = process.env.OUTPUT_DIRECTORY.slice(0, -1);
-    }
-
     console.log(`Perparing to insert document for video: ${program.video} into the database`);
 
-    if (program.debug) {
+    if (debug) {
         console.debug('Printing program arguments:');
         console.dir(program.opts(), { maxArrayLength: null });
     }
 
-    console.log(`Connecting to database with URL: ${process.env.MONGOOSE_URL}...`);
-    await mongoose.connect(process.env.MONGOOSE_URL, {
-        useNewUrlParser: true,
-        useCreateIndex: true,
-        useUnifiedTopology: true,
-    });
+    console.log(`Connecting to database with URL: ${parsed.env.MONGOOSE_URL}...`);
+    try {
+        await mongoose.connect(parsed.env.MONGOOSE_URL, {
+            useNewUrlParser: true,
+            useCreateIndex: true,
+            useUnifiedTopology: true,
+        });
+    } catch (err) {
+        console.error('Failed to connect to the database');
+        throw err;
+    }
     console.log('Connected');
 
     // Make sure the video file exists and is a file
@@ -57,7 +68,7 @@ const program = commander.program;
         const stats = fs.statSync(program.video);
         if (!stats.isFile()) {
             console.error(`Video file: ${program.video} is not a file`);
-            throw err;
+            throw new Error(`Video file: ${program.video} is not a file`);
         }
         videoFilesize = stats.size;
     } catch (err) {
@@ -84,6 +95,7 @@ const program = commander.program;
     const basename = path.basename(
         program.video.slice(0, -path.extname(program.video).length)
     );
+    const ext = path.extname(program.video).slice(1);
 
     // Basic check to make sure each video was downloaded in a unique folder
     // This isn't perfect though as it is only checking the start of the filename
@@ -110,6 +122,37 @@ const program = commander.program;
         file !== path.basename(program.video)
         && file !== basename + '.info.json'
     );
+
+    // Get the video metadata file
+    const infoFile = path.join(videoDirectory, basename + '.info.json');
+    let [infojsonData, infoFilesize, infoMd5] = getFileData(infoFile, true);
+
+    // Parse metadata from the video metadata file
+    try {
+        infojsonData = JSON.parse(infojsonData);
+    } catch (err) {
+        console.error(`Failed to parse video metadata file: ${infoFile}`);
+        throw err;
+    }
+
+    // Make sure video metadata has the required properties
+    const requiredProperties = ['id', 'extractor', 'title'];
+    for (let i = 0; i < requiredProperties.length; i++) {
+        if (!infojsonData.hasOwnProperty(requiredProperties[i])) {
+            const err = 'Video metadata file does not have required property:'
+                + ` ${requiredProperties[i]}`;
+            console.error(err);
+            throw new Error(err);
+        }
+    }
+
+    // Make sure the video doesn't already exist in the database
+    let video = await Video.findOne({ extractor: infojsonData.extractor, id: infojsonData.id });
+    if (video) {
+        console.warn(`Document with extractor: ${infojsonData.extractor} and id: ${infojsonData.id} already exists in the database`);
+        mongoose.disconnect();
+        process.exit(0);
+    }
 
     // Hash the video file
     console.log('Generating MD5 hash for video file...');
@@ -142,7 +185,7 @@ const program = commander.program;
         throw new Error('ffprobe returned no data');
     }
 
-    if (program.debug) {
+    if (debug) {
         console.debug('Printing probe data:');
         console.dir(ffprobeData, { maxArrayLength: null });
     }
@@ -171,29 +214,6 @@ const program = commander.program;
     // TODO: Here is where I might collect metadata from --write-metadata and
     // --xattrs but the data appears to be redundant
 
-    // Get the video metadata file
-    const infoFile = path.join(videoDirectory, basename + '.info.json');
-    let [infojsonData, infoFilesize, infoMd5] = getFileData(infoFile, true);
-
-    // Parse metadata from the video metadata file
-    try {
-        infojsonData = JSON.parse(infojsonData);
-    } catch (err) {
-        console.error(`Failed to parse video metadata file: ${infoFile}`);
-        throw err;
-    }
-
-    // Make sure video metadata has the required properties
-    const requiredProperties = ['id', 'extractor', 'title'];
-    for (let i = 0; i < requiredProperties.length; i++) {
-        if (!infojsonData.hasOwnProperty(requiredProperties[i])) {
-            const err = 'Video metadata file does not have required property:'
-                + ` ${requiredProperties[i]}`;
-            console.error(err);
-            throw new Error(err);
-        }
-    }
-
     // Get the description file (if it exists)
     const descriptionFile = path.join(videoDirectory, basename + '.description');
     const [descriptionData, descriptionFilesize, descriptionMd5] = getFileData(descriptionFile);
@@ -210,6 +230,10 @@ const program = commander.program;
         potentialThumbnailFiles.push(
             path.join(videoDirectory, basename + '.' + extensionFromUrl(infojsonData.thumbnail))
         );
+        // For compatibility with youtube-dl version 2020.12.12+
+        potentialThumbnailFiles.push(
+            path.join(videoDirectory, basename + '.' + ext + '.' + extensionFromUrl(infojsonData.thumbnail))
+        );
     }
     if (infojsonData.hasOwnProperty('thumbnails')) {
         for (let i = 0; i < infojsonData.thumbnails.length; i++) {
@@ -220,6 +244,22 @@ const program = commander.program;
                     path.join(
                         videoDirectory,
                         basename + '_' + infojsonData.thumbnails[i].id + '.'
+                        + extensionFromUrl(infojsonData.thumbnails[i].url)
+                    )
+                );
+                // For compatibility with youtube-dl version 2020.12.12+
+                potentialThumbnailFiles.push(
+                    path.join(
+                        videoDirectory,
+                        basename + '.' + ext + '_' + infojsonData.thumbnails[i].id + '.'
+                        + extensionFromUrl(infojsonData.thumbnails[i].url)
+                    )
+                );
+                // For compatibility with yt-dlp version 2021.02.04+
+                potentialThumbnailFiles.push(
+                    path.join(
+                        videoDirectory,
+                        basename + '.' + infojsonData.thumbnails[i].id + '.'
                         + extensionFromUrl(infojsonData.thumbnails[i].url)
                     )
                 );
@@ -250,10 +290,10 @@ const program = commander.program;
 
     // Create the resized thumbnail files
     let resizedThumbnailsDirectory = path.join(
-        process.env.OUTPUT_DIRECTORY,
+        parsed.env.OUTPUT_DIRECTORY,
         'thumbnails',
         path.relative(
-            path.join(process.env.OUTPUT_DIRECTORY, 'videos'), videoDirectory
+            path.join(parsed.env.OUTPUT_DIRECTORY, 'videos'), videoDirectory
         )
     );
 
@@ -354,6 +394,14 @@ const program = commander.program;
         chapters = infojsonData.chapters;
     }
 
+    let likeDislikeRatio;
+    if (
+        typeof infojsonData?.like_count === 'number'
+        && typeof infojsonData?.dislike_count === 'number'
+    ) {
+        likeDislikeRatio = (infojsonData.like_count - infojsonData.dislike_count) / (infojsonData.like_count + infojsonData.dislike_count) || 0;
+    }
+
     // If there are files we could not determine the identity of throw an error
     if (files.length > 0) {
         console.error(`Failed to determine the identity of ${files.length} files:`);
@@ -363,7 +411,7 @@ const program = commander.program;
 
     // Create the folder with the extractor name for the avatars
     fs.ensureDirSync(path.join(
-        process.env.OUTPUT_DIRECTORY,
+        parsed.env.OUTPUT_DIRECTORY,
         'avatars',
         infojsonData.extractor.replace(/[|:&;$%@"<>()+,/\\]/g, ' -')
     ));
@@ -394,15 +442,16 @@ const program = commander.program;
     }
 
     let uploader;
-    if (infojsonData.uploader) {
+    if (infojsonData.uploader || infojsonData.uploader_id || infojsonData.channel_id) {
         try {
             uploader = await Uploader.findOne({
                 extractor: infojsonData.extractor,
-                name: infojsonData.uploader
+                id: infojsonData.channel_id || infojsonData.uploader_id || infojsonData.uploader,
             });
             if (!uploader) uploader = await new Uploader({
                 extractor: infojsonData.extractor,
-                name: infojsonData.uploader
+                id: infojsonData.channel_id || infojsonData.uploader_id || infojsonData.uploader,
+                name: infojsonData.uploader || infojsonData.uploader_id || infojsonData.channel_id,
             }).save();
         } catch (err) {
             console.error('Failed to retrieve uploader document');
@@ -410,8 +459,76 @@ const program = commander.program;
         }
     }
 
+    let playlistUploader;
+    if (infojsonData.playlist_uploader || infojsonData.playlist_uploader_id) {
+        try {
+            playlistUploader = await Uploader.findOne({
+                extractor: infojsonData.extractor,
+                id: infojsonData.playlist_uploader_id || infojsonData.playlist_uploader,
+            });
+            if (!playlistUploader) playlistUploader = await new Uploader({
+                extractor: infojsonData.extractor,
+                id: infojsonData.playlist_uploader_id || infojsonData.playlist_uploader,
+                name: infojsonData.playlist_uploader || infojsonData.playlist_uploader_id,
+            }).save();
+        } catch (err) {
+            console.error('Failed to retrieve playlist uploader document');
+            throw err;
+        }
+    }
+
+    let playlist;
+    if (infojsonData.playlist_title || infojsonData.playlist || infojsonData.playlist_id) {
+        try {
+            playlist = await Playlist.findOne({
+                extractor: infojsonData.extractor,
+                id: infojsonData.playlist_id || infojsonData.playlist || infojsonData.playlist_title,
+            });
+            if (!playlist) {
+                playlist = await new Playlist({
+                    extractor: infojsonData.extractor,
+                    id: infojsonData.playlist_id || infojsonData.playlist || infojsonData.playlist_title,
+                    name: infojsonData.playlist_title || infojsonData.playlist || infojsonData.playlist_id,
+                    description: infojsonData.playlist_description,
+                    uploaderDocument: playlistUploader,
+                }).save();
+
+                // Update the uploader playlist created count
+                if (playlistUploader) {
+                    playlistUploader.playlistCreatedCount++;
+                    await playlistUploader.save();
+                }
+            }
+        } catch (err) {
+            console.error('Failed to retrieve playlist document');
+            throw err;
+        }
+    }
+
+    // Parse the stream fps from ffprobe
+    let ffprobeVideoStreamFps;
+    try {
+        ffprobeVideoStreamFps = eval(ffprobeVideoStream?.avg_frame_rate)
+    } catch (err) {
+        ffprobeVideoStreamFps = null;
+    }
+    if (isNaN(ffprobeVideoStreamFps)) ffprobeVideoStreamFps = null;
+
+    // Get the error document if repairing
+    let error;
+    if (program.isRepair) {
+        try {
+            error = await DownloadError.findOne({ _id: program.errorId });
+        }
+        catch (err) {
+            console.log('Could not find error document');
+            throw err;
+        }
+        if (!error) throw new Error('Could not find error document');
+    }
+
     // Insert the document
-    let video = new Video({
+    video = new Video({
         extractor: infojsonData.extractor,
         extractorKey: infojsonData.extractor_key,
         id: infojsonData.id,
@@ -437,10 +554,10 @@ const program = commander.program;
         acodec: infojsonData.acodec || ffprobeAudioStream?.codec_name,
         asr: infojsonData.asr || ffprobeAudioStream?.sample_rate,
         vbr: infojsonData.vbr || ffprobeVideoStream?.bit_rate,
-        fps: infojsonData.fps || eval(ffprobeVideoStream?.avg_frame_rate),
+        fps: infojsonData.fps || ffprobeVideoStreamFps,
         vcodec: infojsonData.vcodec || ffprobeVideoStream?.codec_name,
         url: infojsonData.url,
-        ext: infojsonData.ext || path.extname(program.video),
+        ext: infojsonData.ext || ext,
         playerUrl: infojsonData.player_url,
         altTitle: infojsonData.alt_title,
         displayId: infojsonData.display_id,
@@ -486,9 +603,9 @@ const program = commander.program;
         season: infojsonData.season,
         seasonNumber: infojsonData.season_number,
         seasonId: infojsonData.season_id,
-        episode: infojsonData.epidode,
-        episodeNumber: infojsonData.epidode_number,
-        episodeId: infojsonData.epidode_id,
+        episode: infojsonData.episode,
+        episodeNumber: infojsonData.episode_number,
+        episodeId: infojsonData.episode_id,
         track: infojsonData.track,
         trackNumber: infojsonData.track_number,
         trackId: infojsonData.track_id,
@@ -506,8 +623,10 @@ const program = commander.program;
         playlistUploader: infojsonData.playlist_uploader,
         playlistUploaderId: infojsonData.playlist_uploader_id,
         playlistUploaderUrl: infojsonData.playlist_uploader_url,
+        playlistDescription: infojsonData.playlist_description,
         hashtags: hashtags,
-        directory: slash(path.relative(path.join(process.env.OUTPUT_DIRECTORY, 'videos'), videoDirectory)),
+        likeDislikeRatio: likeDislikeRatio,
+        directory: slash(path.relative(path.join(parsed.env.OUTPUT_DIRECTORY, 'videos'), videoDirectory)),
         totalFilesize: videoFilesize + infoFilesize + (descriptionFilesize || 0) + (annotationsFilesize || 0) + totalThumbnailFilesize + (mediumResizedThumbnailFilesize || 0) + (smallResizedThumbnailFilesize || 0) + totalSubtitleFilesize,
         totalOriginalFilesize: videoFilesize + infoFilesize + (descriptionFilesize || 0) + (annotationsFilesize || 0) + totalThumbnailFilesize + totalSubtitleFilesize,
         videoFile: {
@@ -547,43 +666,67 @@ const program = commander.program;
         } : undefined,
         subtitleFiles: subtitleFiles,
         unindexedFiles: files,
-        dateDownloaded: new Date(),
-        formatCode: job.formatCode,
-        isAudioOnly: job.isAudioOnly,
-        urls: job.urls,
-        arguments: job.arguments,
-        overrideUploader: job.overrideUploader,
+        dateDownloaded: program.downloaded ? new Date(+program.downloaded) : program.isRepair ? error.dateDownloaded : new Date(),
+        formatCode: program.isImport ? null : program.isRepair ? error.formatCode : job.formatCode,
+        isAudioOnly: program.isImport ? null : program.isRepair ? error.isAudioOnly : job.isAudioOnly,
+        urls: program.isImport ? null : program.isRepair ? error.urls : job.urls,
+        arguments: program.isImport ? null : program.isRepair ? error.arguments : job.arguments,
+        overrideUploader: program.isRepair ? error.overrideUploader : job.overrideUploader,
         originalUploader: originalUploader,
-        jobDocument: job._id,
         uploaderDocument: uploader?._id,
-        youtubeDlVersion: program.youtubeDlVersion,
+        playlistDocument: playlist?._id,
+        jobDocument: job._id,
+        youtubeDlVersion: program.isImport ? null : program.isRepair ? error.youtubeDlVersion : program.youtubeDlVersion,
+        youtubeDlPath: program.isImport ? null : program.isRepair ? error.youtubeDlPath : parsed.env.YOUTUBE_DL_PATH,
+        imported: program.isRepair ? error.imported : program.isImport,
         scriptVersion: program.version(),
     });
 
-    let alreadyExists = false;
     try {
         await video.save();
     } catch (err) {
-        if (err.name === 'MongoError' && err.code === 11000) {
-            console.warn(`Document with extractor: ${infojsonData.extractor} and id: ${infojsonData.id} already exists in the database`);
-            alreadyExists = true;
-        } else {
-            console.error(`Failed to insert document with extractor: ${infojsonData.extractor} and id: ${infojsonData.id} into the database`);
-            throw err;
+        console.error(`Failed to insert document with extractor: ${infojsonData.extractor} and id: ${infojsonData.id} into the database`);
+        throw err;
+    }
+
+    // Increment statistics
+    statistic.statistics = incrementStatistics(video, statistic.statistics, true);
+    await statistic.save();
+
+    job.statistics = incrementStatistics(video, job.statistics, true);
+    await job.save();
+
+    if (uploader) {
+        uploader.statistics = incrementStatistics(video, uploader.statistics, true);
+
+        if (video.uploadDate === uploader.statistics.newestVideoDateUploaded) {
+            uploader.name = video.uploader || video.uploaderId || video.channelId || uploader.name;
         }
+
+        await uploader.save();
     }
 
-    if (!alreadyExists) {
-        if (uploader) await updateStatisticFields(video, uploader);
-        await updateStatisticFields(video, statistic);
-
-        console.log(`Successfully inserted document into the database`);
+    if (playlistUploader && video.uploadDate === playlistUploader.statistics.newestVideoDateUploaded) {
+        playlistUploader.name = video.playlistUploader || video.playlistUploaderId || playlistUploader.name;
+        await playlistUploader.save();
     }
 
+    if (playlist) {
+        playlist.statistics = incrementStatistics(video, playlist.statistics, true);
+
+        if (video.uploadDate === playlist.statistics.newestVideoDateUploaded) {
+            playlist.name = video.playlistTitle || video.playlist || video.playlistId || playlist.name;
+            playlist.description = video.playlistDescription || playlist.description;
+        }
+
+        await playlist.save();
+    }
+
+    console.log(`Successfully inserted document into the database`);
     mongoose.disconnect();
     process.exit(0);
 })().catch(async err => {
-    if (program.debug) {
+    if (debug) {
         console.error('Encountered a fatal error:');
         oldError(err);
     } else {
@@ -593,20 +736,26 @@ const program = commander.program;
     let videoPath;
     try {
         // Record the error
-        videoPath = slash(path.relative(path.join(process.env.OUTPUT_DIRECTORY, 'videos'), program.video));
+        videoPath = slash(path.relative(path.join(parsed.env.OUTPUT_DIRECTORY, 'videos'), program.video));
         const job = await Job.findOne({ _id: program.jobId });
+        let previousError;
+        if (program.isRepair) previousError = await DownloadError.findOne({ _id: program.errorId });
+        if (!job || (program.isRepair && !previousError)) throw new Error('Could not find required documents');
+
         const errorDocument = {
             videoPath: videoPath,
             errorObject: JSON.stringify(err, Object.getOwnPropertyNames(err)),
-            dateDownloaded: new Date(),
+            dateDownloaded: program.downloaded ? new Date(+program.downloaded) : program.isRepair ? previousError.dateDownloaded : new Date(),
             errorOccurred: new Date(),
-            youtubeDlVersion: program.youtubeDlVersion,
+            youtubeDlVersion: program.isImport ? null : program.isRepair ? previousError.youtubeDlVersion : program.youtubeDlVersion,
+            youtubeDlPath: program.isImport ? null : program.isRepair ? previousError.youtubeDlPath : parsed.env.YOUTUBE_DL_PATH,
             jobDocument: job._id,
-            formatCode: job.formatCode,
-            isAudioOnly: job.isAudioOnly,
-            urls: job.urls,
-            arguments: job.arguments,
-            overrideUploader: job.overrideUploader,
+            formatCode: program.isImport ? null : program.isRepair ? previousError.formatCode : job.formatCode,
+            isAudioOnly: program.isImport ? null : program.isRepair ? previousError.isAudioOnly : job.isAudioOnly,
+            urls: program.isImport ? null : program.isRepair ? previousError.urls : job.urls,
+            arguments: program.isImport ? null : program.isRepair ? previousError.arguments : job.arguments,
+            overrideUploader: program.isRepair ? previousError.overrideUploader : job.overrideUploader,
+            imported: program.isRepair ? previousError.imported : program.isImport,
             scriptVersion: program.version(),
         }
         if (mongoose.connection.readyState === 1) {
@@ -620,18 +769,18 @@ const program = commander.program;
             await error.save();
             console.log('Recorded error successfully');
         } else {
-            fs.ensureDirSync(process.env.OUTPUT_DIRECTORY);
-            fs.appendFileSync(path.join(process.env.OUTPUT_DIRECTORY, 'errors.txt'), JSON.stringify(errorDocument) + '\r\n');
+            fs.ensureDirSync(parsed.env.OUTPUT_DIRECTORY);
+            fs.appendFileSync(path.join(parsed.env.OUTPUT_DIRECTORY, 'errors.txt'), JSON.stringify(errorDocument) + '\r\n');
             console.error('Failed save error to the database. Saved error object to file');
         }
     } catch (err) {
-        if (program.debug) oldError(err);
+        if (debug) oldError(err);
         try {
-            fs.ensureDirSync(process.env.OUTPUT_DIRECTORY);
-            fs.appendFileSync(path.join(process.env.OUTPUT_DIRECTORY, 'unknown errors.txt'), videoPath + '\r\n');
+            fs.ensureDirSync(parsed.env.OUTPUT_DIRECTORY);
+            fs.appendFileSync(path.join(parsed.env.OUTPUT_DIRECTORY, 'unknown errors.txt'), videoPath + '\r\n');
             console.error('Failed to capture error. Saved video file name');
         } catch (err) {
-            if (program.debug) oldError(err);
+            if (debug) oldError(err);
             console.error('Failed to record error');
         }
     }
@@ -660,7 +809,7 @@ console.error = message => {
 
 const generateFileHash = async (filename) => {
     return new Promise((resolve, reject) => {
-        if (process.env.SKIP_HASHING.toLowerCase() === 'true') return resolve(undefined);
+        if (parsed.env.SKIP_HASHING) return resolve(undefined);
         let shasum = crypto.createHash('md5');
         let readStream = fs.createReadStream(filename);
         readStream.on('data', (data) => {
@@ -674,7 +823,7 @@ const generateFileHash = async (filename) => {
 }
 
 const generateDataHash = (buffer) => {
-    if (process.env.SKIP_HASHING.toLowerCase() === 'true') return undefined;
+    if (parsed.env.SKIP_HASHING) return undefined;
     return crypto.createHash('md5').update(buffer).digest('hex');
 }
 
@@ -706,7 +855,7 @@ const generateThumbnailFile = async (sourceData, width, height, filepath) => {
     try {
         const data = await sharp(sourceData)
             .resize({ width: width, height: height, fit: sharp.fit.inside })
-            .jpeg({ quality: +process.env.THUMBNAIL_QUALITY, chromaSubsampling: process.env.THUMBNAIL_CHROMA_SUBSAMPLING })
+            .jpeg({ quality: parsed.env.THUMBNAIL_QUALITY, chromaSubsampling: parsed.env.THUMBNAIL_CHROMA_SUBSAMPLING })
             .toBuffer();
         const filesize = data.length;
         const md5 = generateDataHash(data);
@@ -719,71 +868,9 @@ const generateThumbnailFile = async (sourceData, width, height, filepath) => {
     }
 }
 
-const updateStatisticFields = async (video, statistic) => {
-    // Update the uploader and video statistics
-    if (statistic.collection.name === 'statistics') {
-        if (video.uploadDate && (!statistic.oldestVideoUploadDate || video.uploadDate.getTime() < statistic.oldestVideoUploadDate.getTime())) {
-            statistic.oldestVideoUploadDate = video.uploadDate;
-            statistic.oldestVideo = video._id;
-        }
-    }
-
-    if (statistic.collection.name === 'uploaders') {
-        if (video.uploadDate && (!statistic.lastDateUploaded || video.uploadDate.getTime() > statistic.lastDateUploaded.getTime())) {
-            statistic.lastDateUploaded = video.uploadDate;
-        }
-    }
-
-    // save shared properties
-    statistic.totalVideoCount++;
-    statistic.totalDuration += video.duration || 0;
-    statistic.totalFilesize += video.totalFilesize;
-    statistic.totalOriginalFilesize += video.totalOriginalFilesize;
-    statistic.totalVideoFilesize += video.videoFile.filesize;
-    statistic.totalInfoFilesize += video.infoFile.filesize;
-    statistic.totalDescriptionFilesize += video.descriptionFile?.filesize || 0;
-    statistic.totalAnnotationsFilesize += video.annotationsFile?.filesize || 0
-    statistic.totalThumbnailFilesize += video.thumbnailFiles.reduce((a, b) => a + (b.filesize || 0), 0);
-    statistic.totalResizedThumbnailFilesize += (video.mediumResizedThumbnailFile?.filesize || 0) + (video.smallResizedThumbnailFile?.filesize || 0);
-    statistic.totalSubtitleFilesize += video.subtitleFiles.reduce((a, b) => a + (b.filesize || 0), 0);
-    statistic.totalViewCount += video.viewCount || 0;
-    statistic.totalLikeCount += video.likeCount || 0;
-    statistic.totalDislikeCount += video.dislikeCount || 0;
-    if (video.viewCount && video.viewCount > statistic.recordViewCount) {
-        statistic.recordViewCount = video.viewCount;
-        statistic.recordViewCountVideo = video._id;
-    }
-    if (video.likeCount && video.likeCount > statistic.recordLikeCount) {
-        statistic.recordLikeCount = video.likeCount;
-        statistic.recordLikeCountVideo = video._id;
-    }
-    if (video.dislikeCount && video.dislikeCount > statistic.recordDislikeCount) {
-        statistic.recordDislikeCount = video.dislikeCount;
-        statistic.recordDislikeCountVideo = video._id;
-    }
-    const props = ['tags', 'categories', 'hashtags'];
-    for (let i = 0; i < props.length; i++) {
-        for (let j = 0; j < video[props[i]].length; j++) {
-            const index = statistic[props[i]].map(e => e.name).indexOf(video[props[i]][j]);
-            if (index === -1) {
-                statistic[props[i]].push({ name: video[props[i]][j], count: 1 });
-            } else {
-                statistic[props[i]][index].count++;
-            }
-        }
-    }
-
-    try {
-        await statistic.save();
-    } catch (err) {
-        console.error(`Failed to save ${group[i].collection.name} document`);
-        throw err;
-    }
-}
-
 const doProbeSync = (file) => {
     let proc = spawnSync(
-        process.env.FFPROBE_PATH || 'ffprobe',
+        parsed.env.FFPROBE_PATH || 'ffprobe',
         [
             '-hide_banner',
             '-loglevel',

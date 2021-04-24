@@ -93,8 +93,8 @@ export default class StatisticsPage extends Component {
                                     <StatisticColumn
                                         title="Total Dislikes"
                                         icon="thumbs-down"
-                                        statistic={abbreviateNumber(statistic.totalLikeCount)}
-                                        detailedStatistic={statistic.totalLikeCount.toLocaleString() + ' dislikes'}
+                                        statistic={abbreviateNumber(statistic.totalDislikeCount)}
+                                        detailedStatistic={statistic.totalDislikeCount.toLocaleString() + ' dislikes'}
                                     />
                                 </Row>
                                 <h5>
@@ -207,7 +207,7 @@ export default class StatisticsPage extends Component {
                             {statistic.recordDislikeCountVideo &&
                                 <SignificantVideo
                                     title="Most Disliked Video"
-                                    icon="eye"
+                                    icon="thumbs-down"
                                     statistic={abbreviateNumber(statistic.recordDislikeCount)}
                                     detailedStatistic={statistic.recordDislikeCount.toLocaleString() + ' dislikes'}
                                     video={statistic.recordDislikeCountVideo}
@@ -217,8 +217,8 @@ export default class StatisticsPage extends Component {
                                 <SignificantVideo
                                     title="Oldest Video"
                                     icon="hourglass-end"
-                                    statistic={'Uploaded ' + dateToTimeSinceString(new Date(statistic.oldestVideoUploadDate))}
-                                    detailedStatistic={'Uploaded on ' + new Date(statistic.oldestVideoUploadDate).toLocaleDateString()}
+                                    statistic={'Uploaded ' + dateToTimeSinceString(new Date(statistic.oldestVideoDateUploaded))}
+                                    detailedStatistic={'Uploaded on ' + new Date(statistic.oldestVideoDateUploaded).toLocaleDateString()}
                                     video={statistic.oldestVideo}
                                 />
                             }

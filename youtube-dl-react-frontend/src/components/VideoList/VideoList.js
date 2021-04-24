@@ -90,6 +90,7 @@ export default class VideoList extends Component {
     render() {
         const videos = this.state.videos.map(video =>
             <Col
+                style={this.props?.layout === 'playlist' ? { flex: '0 0 100%', maxWidth: '100%' } : {}}
                 className="mb-3 px-1 col-xxl-2"
                 lg="3"
                 sm="6"
@@ -98,7 +99,9 @@ export default class VideoList extends Component {
             >
                 <VideoPreview
                     video={video}
-                    width="100%"
+                    width={this.props?.layout === 'playlist' ? '168px' : '100%'}
+                    small={this.props?.layout === 'playlist' ? true : false}
+                    horizontal={this.props?.layout === 'playlist' ? true : false}
                 />
             </Col>
         );
@@ -157,8 +160,8 @@ export default class VideoList extends Component {
                                                     value={this.state['sort']}
                                                 >
                                                     <option value="relevance">Relevance</option>
-                                                    <option value="newest_date">Uploaded (Newest)</option>
-                                                    <option value="oldest_date">Uploaded (Oldest)</option>
+                                                    <option value="newest_date">Date Uploaded (Newest)</option>
+                                                    <option value="oldest_date">Date Uploaded (Oldest)</option>
                                                     <option value="longest_duration">Duration (Longest)</option>
                                                     <option value="shortest_duration">Duration (Shortest)</option>
                                                     <option value="largest_size">Filesize (Largest)</option>
@@ -167,6 +170,12 @@ export default class VideoList extends Component {
                                                     <option value="least_views">Views (Least)</option>
                                                     <option value="most_likes">Likes (Most)</option>
                                                     <option value="least_likes">Likes (Least)</option>
+                                                    <option value="most_dislikes">Dislikes (Most)</option>
+                                                    <option value="least_dislikes">Dislikes (Least)</option>
+                                                    <option value="ratio_likes">Likes to Dislikes (Ratio)</option>
+                                                    <option value="ratio_dislikes">Dislikes to Likes (Ratio)</option>
+                                                    <option value="newest_download">Date Downloaded (Newest)</option>
+                                                    <option value="oldest_download">Date Downloaded (Oldest)</option>
                                                 </Form.Control>
                                             </Form.Group>
                                         </Form>

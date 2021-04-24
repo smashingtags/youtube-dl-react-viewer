@@ -3,16 +3,53 @@ import express from 'express';
 import Video from '../models/video.model.js';
 import Uploader from '../models/uploader.model.js';
 
-import { sortBy, getRandomVideo } from '../utilities/video.utility.js';
+import { search, getRandomVideo } from '../utilities/video.utility.js';
 
 const router = express.Router();
 
-router.get('/:extractor/:name', async (req, res) => {
+router.get('/page/:page', async (req, res) => {
+    const perPage = 18;
+    let uploaders;
+    let totalWebsites;
+    let totalUploaders;
+    let maxPages;
+    let page = parseInt(req.params.page);
+
+    if (isNaN(page)) return res.sendStatus(404);
+    page--;
+    if (page < 0) return res.sendStatus(404);
+
+    try {
+        uploaders = await Uploader
+            .find({}, '-_id extractor id name playlistCreatedCount statistics.totalVideoCount'
+                + ' statistics.totalVideoFilesize statistics.newestVideoDateUploaded')
+            .collation({ locale: 'en' })
+            .sort({ name: 1 })
+            .skip(page * perPage)
+            .limit(perPage)
+            .lean()
+            .exec();
+        totalWebsites = (await Uploader.distinct('extractor')).length;
+        totalUploaders = await Uploader.countDocuments();
+        maxPages = Math.ceil(totalUploaders / perPage);
+    } catch (err) {
+        return res.sendStatus(500);
+    }
+
+    res.json({
+        uploaders: uploaders,
+        totalWebsites: totalWebsites,
+        totalUploaders: totalUploaders,
+        maxPages: maxPages
+    });
+});
+
+router.get('/:extractor/:id', async (req, res) => {
     let uploader;
     try {
         uploader = await Uploader.findOne({
             extractor: req.params.extractor,
-            name: req.params.name
+            id: req.params.id,
         });
     }
     catch (err) {
@@ -20,37 +57,38 @@ router.get('/:extractor/:name', async (req, res) => {
     }
     if (!uploader) return res.sendStatus(404);
 
-    uploader = uploader.toJSON();
-    const returnTags = 5;
-    uploader.tags.slice(0, returnTags);
-    uploader.categories.slice(0, returnTags);
-    uploader.hashtags.slice(0, returnTags);
-
-    res.json({ uploader });
+    res.json({ uploader: uploader.toJSON() });
 });
 
-router.get('/:extractor/:name/:page', async (req, res) => {
+router.get('/:extractor/:id/:page', async (req, res) => {
     const page = parseInt(req.params.page) || 0;
-    const pattern = { extractor: req.params.extractor, uploader: req.params.name };
+
+    let uploader;
+    try {
+        uploader = await Uploader.findOne({
+            extractor: req.params.extractor,
+            id: req.params.id,
+        });
+    }
+    catch (err) {
+        return res.sendStatus(500);
+    }
+    if (!uploader) return res.sendStatus(404);
+
+    const filter = { uploaderDocument: uploader._id };
 
     let videos;
     let totals = {};
     try {
-        totals.count = (await Video.countDocuments(pattern)) || 0;
-        videos = await Video.find(pattern)
-            .select('-_id extractor id title mediumResizedThumbnailFile directory uploader videoFile uploadDate duration width height viewCount')
-            .sort(sortBy(req.query['sort']))
-            .skip(page * parseInt(process.env.PAGE_SIZE))
-            .limit(parseInt(process.env.PAGE_SIZE))
-            .lean()
-            .exec();
+        videos = await search(req.query, page, filter);
+        totals.count = (await Video.countDocuments(filter)) || 0;
     } catch (err) {
         return res.sendStatus(500);
     }
 
     let randomVideo;
     try {
-        randomVideo = await getRandomVideo(totals.count, pattern);
+        randomVideo = await getRandomVideo({}, totals.count, filter);
     } catch (err) {
         return res.sendStatus(500);
     }

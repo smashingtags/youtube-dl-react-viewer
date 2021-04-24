@@ -10,8 +10,8 @@ import { UserContext } from '../../contexts/user.context';
 import { bytesToSizeString, abbreviateNumber, resolutionToBadge } from '../../utilities/format.utility';
 import { getImage, defaultImage } from '../../utilities/image.utility';
 import history from '../../utilities/history.utility';
+import { createSearchLink } from '../../utilities/search.utility';
 import ISO6391 from 'iso-639-1';
-import queryString from 'query-string';
 import videojs from 'video.js';
 import 'videojs-flash';
 import axios from '../../utilities/axios.utility';
@@ -28,6 +28,9 @@ export default class VideoPage extends Component {
             uploaderVideos: undefined,
             playlistVideos: undefined,
             jobVideos: undefined,
+            uploaderVideosOffset: undefined,
+            playlistVideosOffset: undefined,
+            jobVideosOffset: undefined,
             similarVideos: undefined,
             activeTab: undefined,
             nextVideos: undefined,
@@ -68,6 +71,9 @@ export default class VideoPage extends Component {
                         uploaderVideos: res.data.uploaderVideos,
                         playlistVideos: res.data.playlistVideos,
                         jobVideos: res.data.jobVideos,
+                        uploaderVideosOffset: res.data.uploaderVideosOffset,
+                        playlistVideosOffset: res.data.playlistVideosOffset,
+                        jobVideosOffset: res.data.jobVideosOffset,
                         similarVideos: res.data.similarVideos,
                         nextVideos: {
                             uploader: this.getNextVideo(res.data.video, res.data.uploaderVideos),
@@ -164,10 +170,6 @@ export default class VideoPage extends Component {
         }
     }
 
-    createSearchLink(str) {
-        return `/videos?${queryString.stringify({ search: str })}`;
-    }
-
     handleInputChange = (e) => {
         var { name, checked } = e.target;
         localStorage.setItem(name, checked);
@@ -178,6 +180,17 @@ export default class VideoPage extends Component {
 
     render() {
         let video = this.state.video;
+        let seriesData;
+        if (video) {
+            seriesData = <>
+                <FontAwesomeIcon icon="tv" />
+                {!!video.series && ' ' + video.series}
+                {video.seasonNumber !== null ? ' S' + video.seasonNumber : false}
+                {video.seasonNumber !== null && video.episodeNumber !== null ? <> &middot;</> : false}
+                {video.episodeNumber !== null ? ' E' + video.episodeNumber : false}
+            </>;
+        }
+
         return (
             <PageLoadWrapper
                 loading={this.state.loading}
@@ -195,14 +208,18 @@ export default class VideoPage extends Component {
                                 >
                                 </video>
                             </div>
-                            {!!video.location
-                                ? <Link to={this.createSearchLink(video.location)}>
-                                    <FontAwesomeIcon icon="map-marker-alt" /> {video.location}
-                                </Link>
+                            {!!video.series || video.seasonNumber !== null || video.episodeNumber !== null || !!video.location
+                                ? (!!video.series || video.seasonNumber !== null || video.episodeNumber !== null)
+                                    ? !!video.series
+                                        ? <Link to={createSearchLink(video.series)}>{seriesData}</Link>
+                                        : <span className="text-muted">{seriesData}</span>
+                                    : <Link to={createSearchLink(video.location)}>
+                                        <FontAwesomeIcon icon="map-marker-alt" /> {video.location}
+                                    </Link>
                                 : video.hashtags.slice(0, 3).map((hashtag, i) =>
                                     <React.Fragment key={i}>
                                         {i > 0 && ', '}
-                                        <Link to={this.createSearchLink(hashtag)}>
+                                        <Link to={createSearchLink(hashtag)}>
                                             {hashtag}
                                         </Link>
                                     </React.Fragment>
@@ -220,7 +237,7 @@ export default class VideoPage extends Component {
                                     >
                                         <Media>
                                             <Link
-                                                to={`/uploaders/${video.extractor}/${video.uploader}`}
+                                                to={`/uploaders/${video.uploaderDocument.extractor}/${video.uploaderDocument.id}`}
                                                 className="mr-3"
                                             >
                                                 <Image
@@ -233,13 +250,13 @@ export default class VideoPage extends Component {
                                             </Link>
                                             <Media.Body>
                                                 <Link
-                                                    to={`/uploaders/${video.extractor}/${video.uploader}`}
+                                                    to={`/uploaders/${video.uploaderDocument.extractor}/${video.uploaderDocument.id}`}
                                                     className="text-dark">
-                                                    {video.uploader}
+                                                    {video.uploaderDocument.name}
                                                 </Link>
                                                 <small className="text-muted d-block">
-                                                    {video.uploaderDocument.totalVideoCount.toLocaleString()} video
-                                                    {video.uploaderDocument.totalVideoCount !== 1 && 's'}
+                                                    {video.uploaderDocument.statistics.totalVideoCount.toLocaleString()} video
+                                                    {video.uploaderDocument.statistics.totalVideoCount !== 1 && 's'}
                                                 </small>
                                             </Media.Body>
                                         </Media>
@@ -349,7 +366,7 @@ export default class VideoPage extends Component {
                                         <TableStatistic statistic={
                                             video.tags.map((tag, i) =>
                                                 <Link
-                                                    to={this.createSearchLink(tag)}
+                                                    to={createSearchLink(tag)}
                                                     key={i}
                                                 >
                                                     <Badge className="mr-1" variant="secondary">
@@ -364,7 +381,7 @@ export default class VideoPage extends Component {
                                             {
                                                 video.categories.map((category, i) =>
                                                     <Link
-                                                        to={this.createSearchLink(category)}
+                                                        to={createSearchLink(category)}
                                                         key={i}
                                                     >
                                                         <Badge className="mr-1" variant="secondary">
@@ -376,20 +393,22 @@ export default class VideoPage extends Component {
                                             title="Categories"
                                         />
                                     }
-                                    <TableStatistic statistic={video.license} title="License" />
-                                    <TableStatistic statistic={video.season} title="Season" />
+                                    <TableStatistic statistic={video.series} title="Series" link />
+                                    <TableStatistic statistic={video.season} title="Season" link />
                                     <TableStatistic statistic={video.seasonNumber} title="Season number" />
-                                    <TableStatistic statistic={video.episode} title="Episode" />
+                                    <TableStatistic statistic={video.episode} title="Episode" link />
                                     <TableStatistic statistic={video.episodeNumber} title="Episode number" />
-                                    <TableStatistic statistic={video.track} title="Track" />
+                                    <TableStatistic statistic={video.location} title="Location" link />
+                                    <TableStatistic statistic={video.track} title="Track" link />
                                     <TableStatistic statistic={video.trackNumber} title="Track number" />
-                                    <TableStatistic statistic={video.artist} title="Artist" />
-                                    <TableStatistic statistic={video.genre} title="Genre" />
-                                    <TableStatistic statistic={video.album} title="Album" />
-                                    <TableStatistic statistic={video.albumType} title="Album type" />
-                                    <TableStatistic statistic={video.albumArtist} title="Album artist" />
+                                    <TableStatistic statistic={video.artist} title="Artist" link />
+                                    <TableStatistic statistic={video.genre} title="Genre" link />
+                                    <TableStatistic statistic={video.album} title="Album" link />
+                                    <TableStatistic statistic={video.albumType} title="Album type" link />
+                                    <TableStatistic statistic={video.albumArtist} title="Album artist" link />
                                     <TableStatistic statistic={video.discNumber} title="Disc number" />
                                     <TableStatistic statistic={video.releaseYear} title="Release year" />
+                                    <TableStatistic statistic={video.license} title="License" />
                                 </tbody>
                             </Table>
                             <hr />
@@ -422,7 +441,7 @@ export default class VideoPage extends Component {
                             >
                                 <FontAwesomeIcon icon="play" /> Open in VLC
                                     </Button>
-                            {this.context.user?.isSuperuser &&
+                            {window.location.hostname === 'localhost' &&
                                 <Button
                                     variant="primary"
                                     className="mb-2"
@@ -531,28 +550,51 @@ export default class VideoPage extends Component {
                                                 </Nav>
                                             </div>
                                             <Tab.Content>
-                                                {!!video.uploader &&
-                                                    <Tab.Pane eventKey="uploader">
-                                                        <VideoScroller
-                                                            videos={this.state.uploaderVideos}
-                                                            activeVideo={video}
-                                                        />
-                                                    </Tab.Pane>
+                                                {!!video.uploaderDocument &&
+                                                    <>
+                                                        <Tab.Pane eventKey="uploader">
+                                                            <VideoScroller
+                                                                videos={this.state.uploaderVideos}
+                                                                offset={this.state.uploaderVideosOffset}
+                                                                activeVideo={video}
+                                                                activeTab={this.state.activeTab}
+                                                            />
+                                                            <div className="text-center my-1">
+                                                                <Link to={`/uploaders/${video.uploaderDocument.extractor}/${video.uploaderDocument.id}`}>
+                                                                    View All
+                                                                </Link>
+                                                            </div>
+                                                        </Tab.Pane>
+                                                    </>
                                                 }
-                                                {!!video.playlist &&
+                                                {!!video.playlistDocument &&
                                                     <Tab.Pane eventKey="playlist">
                                                         <VideoScroller
                                                             videos={this.state.playlistVideos}
+                                                            offset={this.state.playlistVideosOffset}
                                                             activeVideo={video}
+                                                            activeTab={this.state.activeTab}
                                                         />
+                                                        <div className="text-center my-1">
+                                                            <Link to={`/playlists/${video.playlistDocument.extractor}/${video.playlistDocument.id}`}>
+                                                                View All
+                                                            </Link>
+                                                        </div>
                                                     </Tab.Pane>
                                                 }
                                                 {!!video.jobDocument &&
                                                     <Tab.Pane eventKey="job">
                                                         <VideoScroller
                                                             videos={this.state.jobVideos}
+                                                            offset={this.state.jobVideosOffset}
                                                             activeVideo={video}
+                                                            activeTab={this.state.activeTab}
                                                         />
+                                                        <div className="text-center my-1">
+                                                            <Link to={`/jobs/${video.jobDocument._id}`}>
+                                                                View All
+                                                            </Link>
+                                                        </div>
                                                     </Tab.Pane>
                                                 }
                                             </Tab.Content>
@@ -629,7 +671,7 @@ class VideoScroller extends Component {
                             >
                                 {active
                                     ? <FontAwesomeIcon icon="caret-right" />
-                                    : i
+                                    : i + 1 + this.props.offset
                                 }
                             </small>
                         </VideoPreview>
@@ -645,7 +687,14 @@ const TableStatistic = (props) => {
         !!props.statistic
             ? <tr>
                 <th style={{ whiteSpace: 'nowrap', padding: '0.25rem 0.75rem' }}>{props.title}</th>
-                <td className="w-100" style={{ padding: '0.25rem 0.75rem' }}>{props.statistic}{!!props.unit && ' ' + props.unit}</td>
+                <td className="w-100" style={{ padding: '0.25rem 0.75rem' }}>
+                    {!!props.link
+                        ? <Link to={createSearchLink(props.statistic)}>
+                            {props.statistic}{!!props.unit && ' ' + props.unit}
+                        </Link>
+                        : <>{props.statistic}{!!props.unit && ' ' + props.unit}</>
+                    }
+                </td>
             </tr>
             : null
     );

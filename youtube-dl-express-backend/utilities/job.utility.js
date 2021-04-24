@@ -10,6 +10,7 @@ export default class Downloader {
         this.queued = [];
         this.currentJob = undefined;
         this.process;
+        this.stopping = false;
     }
 
     queue(jobList) {
@@ -20,7 +21,6 @@ export default class Downloader {
     }
 
     async download(chained = false) {
-        // if not downloading or chaining
         if (!this.downloading || chained) {
             this.downloading = true;
 
@@ -49,22 +49,28 @@ export default class Downloader {
                 return 'failed';
             }
 
-            fs.ensureDirSync(process.env.OUTPUT_DIRECTORY);
+            fs.ensureDirSync(parsedEnv.OUTPUT_DIRECTORY);
+
+            let execCommand = `npm run exec -- --youtube-dl-version ${youtubeDlVersion} --job-id ${job._id} --video`;
+            // On non-Windows platforms npm incorrectly escapes the "$" character which can appear in the filename, so node is used here instead
+            if (process.platform !== 'win32') execCommand = `node --require dotenv/config exec.js --youtube-dl-version ${youtubeDlVersion} --job-id ${job._id} --video`;
 
             let jobArguments = [
                 '--exec',
-                `npm run exec -- --youtube-dl-version ${youtubeDlVersion} --job-id ${job._id}${process.env.VERBOSE.toLowerCase() === 'true' ? ' --debug' : ''} --video`,
+                execCommand,
                 '--write-info-json',
                 '--prefer-ffmpeg',
                 '--output',
-                `${process.env.OUTPUT_DIRECTORY}/videos/%(extractor)s/%(id)s/%(title)s - %(uploader)s - %(upload_date)s.%(ext)s`,
+                `${parsedEnv.OUTPUT_DIRECTORY}/videos/%(extractor)s/%(id)s/%(title)s - %(uploader)s - %(upload_date)s.%(ext)s`,
                 '--format',
                 job.formatCode,
                 '--download-archive',
-                path.join(process.env.OUTPUT_DIRECTORY, 'archive.txt'),
+                path.join(parsedEnv.OUTPUT_DIRECTORY, 'archive.txt'),
+                '--cache-dir',
+                path.join(parsedEnv.OUTPUT_DIRECTORY, '.cache'),
             ];
-            if (process.env.VERBOSE.toLowerCase() === 'true') jobArguments.push('--verbose');
-            if (process.platform === 'win32') jobArguments.push('--ffmpeg-location', process.env.FFMPEG_PATH);
+            if (parsedEnv.VERBOSE) jobArguments.push('--verbose');
+            if (process.platform === 'win32') jobArguments.push('--ffmpeg-location', parsedEnv.FFMPEG_PATH);
             if (job.isAudioOnly) jobArguments.push('--extract-audio');
             jobArguments = parsedArguments.concat(jobArguments);
             jobArguments = jobArguments.concat(parsedUrls);
@@ -93,18 +99,39 @@ export default class Downloader {
         }
     }
 
-    stop() {
-        if (this.downloading) {
-            this.downloading = false;
-            this.queued = [];
-            if (this.process) this.process.kill();
-            return 'stopped';
+    async stop() {
+        if (this.downloading && !this.stopping) {
+            if (this.process) {
+                if (process.platform === 'win32') {
+                    this.stopping = true;
+                    const taskkillProcess = await spawnSync('taskkill', ['/pid', this.process.pid, '/f', '/t'], { windowsHide: true });
+                    if (taskkillProcess.status === 0) {
+                        this.downloading = false;
+                        this.queued = [];
+                        this.stopping = false;
+                        return 'stopped';
+                    } else {
+                        this.stopping = false;
+                        return 'failed';
+                    }
+                } else {
+                    this.process.kill('SIGKILL');
+                    this.downloading = false;
+                    this.queued = [];
+                    return 'stopped';
+                }
+            } else {
+                this.downloading = false;
+                this.queued = [];
+                return 'stopped';
+            }
         } else {
             return 'none';
         }
     }
 
-    isDownloading(jobId) {
+    isBusy(jobId) {
+        if (!jobId) return this.downloading;
         return this.downloading && this.queued[0] === jobId;
     }
 }
@@ -165,7 +192,7 @@ const parseUrls = (text) => {
 }
 
 const getYoutubeDlVersion = async () => {
-    const versionProcess = await spawnSync(process.env.YOUTUBE_DL_PATH, ['--version'], { windowsHide: true });
+    const versionProcess = await spawnSync(parsedEnv.YOUTUBE_DL_PATH, ['--version'], { windowsHide: true });
     if (versionProcess.status === 0) {
         return versionProcess.stdout.toString().trim();
     } else {
@@ -174,7 +201,7 @@ const getYoutubeDlVersion = async () => {
 }
 
 const downloadVideos = (jobArguments) => {
-    const youtubeDlProcess = spawn(process.env.YOUTUBE_DL_PATH, jobArguments, { windowsHide: true });
+    const youtubeDlProcess = spawn(parsedEnv.YOUTUBE_DL_PATH, jobArguments, { windowsHide: true });
 
     youtubeDlProcess.stdout.on('data', (data) => {
         process.stdout.write(data);
